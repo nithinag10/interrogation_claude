@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -25,11 +26,41 @@ from app.store import InMemoryStore
 logger = setup_logging()
 
 
+def _normalize_origin(origin: str) -> str:
+    return origin.strip().rstrip("/")
+
+
+def _load_cors_origins() -> list[str]:
+    configured = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+    if configured:
+        origins = [_normalize_origin(origin) for origin in configured.split(",") if origin.strip()]
+        if origins:
+            return origins
+    return [
+        _normalize_origin("http://localhost:5173"),
+        _normalize_origin("http://127.0.0.1:5173"),
+        _normalize_origin("http://127.0.0.1:8080"),
+        _normalize_origin("http://localhost:8080"),
+        _normalize_origin("https://idea-sharpen.vercel.app"),
+    ]
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Business Research Agent API", version="0.1.0")
+    cors_origins = _load_cors_origins()
+    cors_allow_origin_regex = os.getenv(
+        "CORS_ALLOW_ORIGIN_REGEX",
+        r"^https://idea-sharpen(-[a-zA-Z0-9-]+)?\.vercel\.app$",
+    )
+    logger.info(
+        "CORS configured allow_origins=%s allow_origin_regex=%s",
+        cors_origins,
+        cors_allow_origin_regex,
+    )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://127.0.0.1:8080", "http://localhost:8080", "https://idea-sharpen.vercel.app"],
+        allow_origins=cors_origins,
+        allow_origin_regex=cors_allow_origin_regex,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
