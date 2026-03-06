@@ -1,0 +1,1 @@
+I am build a research agent, that will take user buisness related queries from a chat interface in the frontend -> ask if there are any clarifyign question to the users back -> later it users claude code sdk to do the research and return the result to the user. 
