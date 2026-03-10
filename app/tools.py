@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
+import anthropic
 from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    TextBlock,
     create_sdk_mcp_server,
-    query,
     tool,
 )
 
@@ -29,17 +27,21 @@ except ModuleNotFoundError:
 logger = setup_logging()
 INTERVIEW_MAX_TURNS = 8
 
+_anthropic = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
 
 async def get_agent_response(system_prompt: str, prompt: str) -> str:
-    options = ClaudeAgentOptions(system_prompt=system_prompt, max_turns=1, allowed_tools=[])
-    response_text = ""
+    logger.debug("get_agent_response request | system=%s | prompt=%s", system_prompt, prompt)
     async with asyncio.timeout(30):
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        response_text += block.text
-    return response_text.strip()
+        response = await _anthropic.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=system_prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    result = response.content[0].text.strip()
+    logger.debug("get_agent_response response | stop_reason=%s | text=%s", response.stop_reason, result)
+    return result
 
 
 @tool(
@@ -101,19 +103,19 @@ async def simulate_user_interview(args: dict[str, str]) -> dict[str, object]:
         )
         interviewer_reply = await get_agent_response(interviewer_system, interviewer_prompt)
         logger.info("Interviewer Reply: %s", interviewer_reply)
-        await emit_tool_event(
-            "interview_message",
-            {
-                "turn": current_turn,
-                "role": "interviewer",
-                "content": interviewer_reply,
-                "max_turns": max_turns,
-                "remaining_turns": remaining_turns,
-            },
-        )
 
         if "[END_INTERVIEW]" in interviewer_reply:
             analysis = interviewer_reply.replace("[END_INTERVIEW]", "").strip()
+            await emit_tool_event(
+                "interview_message",
+                {
+                    "turn": current_turn,
+                    "role": "interviewer",
+                    "content": analysis,
+                    "max_turns": max_turns,
+                    "remaining_turns": remaining_turns,
+                },
+            )
             transcript += f"\n\n--- INTERVIEWER ANALYSIS ---\n{analysis}"
             logger.info("Interviewer concluded at turn=%d", current_turn)
             await emit_tool_event(
@@ -128,6 +130,16 @@ async def simulate_user_interview(args: dict[str, str]) -> dict[str, object]:
             )
             break
 
+        await emit_tool_event(
+            "interview_message",
+            {
+                "turn": current_turn,
+                "role": "interviewer",
+                "content": interviewer_reply,
+                "max_turns": max_turns,
+                "remaining_turns": remaining_turns,
+            },
+        )
         transcript += f"\nInterviewer: {interviewer_reply}\n"
 
         customer_prompt = (
@@ -152,14 +164,6 @@ async def simulate_user_interview(args: dict[str, str]) -> dict[str, object]:
         )
 
     logger.info("Interview simulation complete")
-    await emit_tool_event(
-        "interview_transcript",
-        {
-            "tool_name": "mcp__research_server__simulate_user_interview",
-            "transcript": transcript,
-            "message": "Interview transcript generated.",
-        },
-    )
     await emit_tool_event(
         "interview_status",
         {

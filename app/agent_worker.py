@@ -210,6 +210,12 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                 if not user_message:
                     continue
 
+                logger.info(
+                    "user request session=%s message=%s",
+                    runtime.session_id,
+                    user_message,
+                )
+
                 with store.lock:
                     session = store.get_session(runtime.session_id)
                     if session:
@@ -397,6 +403,11 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                             runtime.sdk_session_id,
                             msg.is_error,
                             msg.total_cost_usd,
+                        )
+                        logger.info(
+                            "agent response session=%s response=%s",
+                            runtime.session_id,
+                            assistant_message,
                         )
                     else:
                         await _emit(runtime, "message", {"type": type(msg).__name__})
