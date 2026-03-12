@@ -1,0 +1,42 @@
+[
+  {
+    "event": "connected",
+    "data": {
+      "session_id": "s_eaf009df06"
+    }
+  },
+  {
+    "event": "session_ready",
+    "data": {
+      "message": "Session worker initialized."
+    }
+  },
+  {
+    "event": "agent_thinking",
+    "data": {
+      "message": "Agent is analyzing your request."
+    }
+  },
+  {
+    "event": "agent_delta",
+    "data": {
+      "text": "Good. Before I can do anything useful with this, I need to close one gap.\n\nThere are already places to buy and sell Notion templates \u2014 Notion's own gallery, Gumroad storefronts, Etsy, and dedicated sites like Notionery or Thomas Frank's operation. Indie hackers already use these.\n\n**What specifically is broken about those options for the person you're building this for \u2014 the buyer, the seller, or both?**\n\nThat answer determines whether there's a real wedge here or whether you're walking into a crowded room with nothing new to say."
+    }
+  },
+  {
+    "event": "final_report",
+    "data": {
+      "session_id": "s_eaf009df06",
+      "content": "Good. Before I can do anything useful with this, I need to close one gap.\n\nThere are already places to buy and sell Notion templates \u2014 Notion's own gallery, Gumroad storefronts, Etsy, and dedicated sites like Notionery or Thomas Frank's operation. Indie hackers already use these.\n\n**What specifically is broken about those options for the person you're building this for \u2014 the buyer, the seller, or both?**\n\nThat answer determines whether there's a real wedge here or whether you're walking into a crowded room with nothing new to say."
+    }
+  },
+  {
+    "event": "session_done",
+    "data": {
+      "session_id": "s_eaf009df06",
+      "sdk_session_id": "4f944e6d-1d91-4c0f-b4d9-1bef1140d205",
+      "is_error": false,
+      "cost_usd": 0.0270726
+    }
+  }
+]

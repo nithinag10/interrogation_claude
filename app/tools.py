@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 
 import anthropic
 from claude_agent_sdk import (
@@ -55,16 +56,14 @@ async def get_agent_response(system_prompt: str, prompt: str) -> str:
 async def simulate_user_interview(args: dict[str, str]) -> dict[str, object]:
     hypothesis = args["hypothesis"]
     persona = args["persona"]
-    start_message = (
-        f"Starting customer interview with persona '{persona}' to test hypothesis: {hypothesis}"
-    )
-    logger.info("Starting interview simulation for hypothesis=%s", hypothesis)
-    logger.info("System Persona: %s", persona)
+    interview_id = str(uuid.uuid4())
+
+    logger.info("Starting interview interview_id=%s hypothesis=%s persona=%s", interview_id, hypothesis, persona)
+
     await emit_tool_event(
-        "interview_status",
+        "interview_started",
         {
-            "status": "started",
-            "message": start_message,
+            "interview_id": interview_id,
             "hypothesis": hypothesis,
             "persona": persona,
             "max_turns": INTERVIEW_MAX_TURNS,
@@ -82,7 +81,8 @@ async def simulate_user_interview(args: dict[str, str]) -> dict[str, object]:
         current_turn = turn + 1
         remaining_turns = max_turns - current_turn
         turns_completed = current_turn
-        logger.debug("Interview turn=%d", current_turn)
+        logger.debug("Interview turn interview_id=%s turn=%d", interview_id, current_turn)
+
         interviewer_prompt = (
             (
                 "You are in an ongoing interview.\n"
@@ -102,42 +102,44 @@ async def simulate_user_interview(args: dict[str, str]) -> dict[str, object]:
             )
         )
         interviewer_reply = await get_agent_response(interviewer_system, interviewer_prompt)
-        logger.info("Interviewer Reply: %s", interviewer_reply)
+        logger.info("Interviewer interview_id=%s turn=%d reply=%s", interview_id, current_turn, interviewer_reply)
 
         if "[END_INTERVIEW]" in interviewer_reply:
             analysis = interviewer_reply.replace("[END_INTERVIEW]", "").strip()
+            transcript += f"\n\n--- INTERVIEWER ANALYSIS ---\n{analysis}"
             await emit_tool_event(
-                "interview_message",
+                "interview_turn",
                 {
+                    "interview_id": interview_id,
                     "turn": current_turn,
                     "role": "interviewer",
                     "content": analysis,
                     "max_turns": max_turns,
                     "remaining_turns": remaining_turns,
+                    "is_final": True,
                 },
             )
-            transcript += f"\n\n--- INTERVIEWER ANALYSIS ---\n{analysis}"
-            logger.info("Interviewer concluded at turn=%d", current_turn)
             await emit_tool_event(
-                "interview_status",
+                "interview_concluded",
                 {
-                    "status": "concluded",
-                    "message": "Interviewer concluded the interview.",
+                    "interview_id": interview_id,
                     "turn": current_turn,
-                    "max_turns": max_turns,
-                    "remaining_turns": remaining_turns,
+                    "analysis": analysis,
                 },
             )
+            logger.info("Interview concluded early interview_id=%s turn=%d", interview_id, current_turn)
             break
 
         await emit_tool_event(
-            "interview_message",
+            "interview_turn",
             {
+                "interview_id": interview_id,
                 "turn": current_turn,
                 "role": "interviewer",
                 "content": interviewer_reply,
                 "max_turns": max_turns,
                 "remaining_turns": remaining_turns,
+                "is_final": False,
             },
         )
         transcript += f"\nInterviewer: {interviewer_reply}\n"
@@ -151,27 +153,28 @@ async def simulate_user_interview(args: dict[str, str]) -> dict[str, object]:
         )
         customer_reply = await get_agent_response(customer_system, customer_prompt)
         transcript += f"Customer: {customer_reply}\n"
-        logger.info("Customer Reply: %s", customer_reply)
+        logger.info("Customer interview_id=%s turn=%d reply=%s", interview_id, current_turn, customer_reply)
+
         await emit_tool_event(
-            "interview_message",
+            "interview_turn",
             {
+                "interview_id": interview_id,
                 "turn": current_turn,
                 "role": "customer",
                 "content": customer_reply,
                 "max_turns": max_turns,
                 "remaining_turns": remaining_turns,
+                "is_final": False,
             },
         )
 
-    logger.info("Interview simulation complete")
+    logger.info("Interview complete interview_id=%s turns_completed=%d", interview_id, turns_completed)
     await emit_tool_event(
-        "interview_status",
+        "interview_completed",
         {
-            "status": "completed",
-            "message": "Interview simulation completed.",
-            "max_turns": max_turns,
+            "interview_id": interview_id,
             "turns_completed": turns_completed,
-            "remaining_turns": max_turns - turns_completed,
+            "max_turns": max_turns,
         },
     )
     return {"content": [{"type": "text", "text": transcript}]}

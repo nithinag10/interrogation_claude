@@ -31,10 +31,6 @@ async def _emit(runtime: SessionRuntime, event: str, data: dict[str, Any]) -> No
     await runtime.event_queue.put(RunnerEvent(event=event, data=data))
 
 
-async def _emit_phase(runtime: SessionRuntime, status: str, message: str) -> None:
-    await _emit(runtime, "phase", {"status": status, "message": message})
-
-
 def _extract_questions(input_data: dict[str, Any]) -> list[dict[str, Any]]:
     questions = input_data.get("questions", [])
     if not isinstance(questions, list):
@@ -53,6 +49,10 @@ def _extract_transcript_text(content: str | list[dict[str, Any]] | None) -> str:
                     transcript_parts.append(item["text"])
         return "\n".join(transcript_parts).strip()
     return ""
+
+
+def _is_final_report(text: str) -> bool:
+    return "# ColdWater Validation Report" in text or "## The Verdict" in text
 
 
 def _looks_like_interview_transcript(text: str) -> bool:
@@ -77,7 +77,7 @@ def _interview_start_message(hypothesis: str, persona: str) -> str:
 
 async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> None:
     logger.info("Worker started for session=%s", runtime.session_id)
-    await _emit_phase(runtime, "worker_started", "Session worker initialized.")
+    await _emit(runtime, "session_ready", {"message": "Session worker initialized."})
 
     async def _tool_emit(event: str, data: dict[str, Any]) -> None:
         await _emit(runtime, event, data)
@@ -88,34 +88,23 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
 
     async def can_use_tool(tool_name: str, input_data: dict[str, Any], _context: Any):
         logger.info("can_use_tool session=%s tool=%s", runtime.session_id, tool_name)
-        permission_message = f"Agent requested permission to use tool: {tool_name}"
-        if "simulate_user_interview" in tool_name:
-            hypothesis = str(input_data.get("hypothesis", "")).strip()
-            persona = str(input_data.get("persona", "")).strip()
-            permission_message = _interview_start_message(hypothesis=hypothesis, persona=persona)
-        await _emit(
-            runtime,
-            "tool_permission",
-            {
-                "tool_name": tool_name,
-                "message": permission_message,
-            },
-        )
+
         if tool_name != "AskUserQuestion":
             return PermissionResultAllow(updated_input=input_data)
 
         questions = _extract_questions(input_data)
         text_questions = [str(q.get("question", "")).strip() for q in questions if q.get("question")]
+
         with store.lock:
             session = store.get_session(runtime.session_id)
             if session:
                 session.state = SessionState.AWAITING_CLARIFICATION
-        await _emit_phase(
+
+        await _emit(
             runtime,
-            "awaiting_clarification",
-            "Waiting for your clarification before continuing.",
+            "clarification_needed",
+            {"questions": text_questions},
         )
-        await _emit(runtime, "clarification_question", {"questions": text_questions})
         logger.info(
             "awaiting clarification session=%s questions=%d",
             runtime.session_id,
@@ -136,7 +125,7 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                     runtime.input_queue.qsize(),
                 )
                 if queued.kind == "interrupt":
-                    await _emit_phase(runtime, "interrupted", "Run interrupted while awaiting clarification.")
+                    await _emit(runtime, "session_interrupted", {"message": "Run interrupted while awaiting clarification."})
                     logger.info("clarification interrupted session=%s", runtime.session_id)
                     continue
                 if queued.kind != "message":
@@ -161,7 +150,7 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                 )
                 await _emit(
                     runtime,
-                    "clarification_answer_received",
+                    "clarification_received",
                     {"question": question, "answer_preview": answer[:120]},
                 )
                 break
@@ -195,12 +184,12 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                     runtime.input_queue.qsize(),
                 )
                 if queued.kind == "stop":
-                    await _emit_phase(runtime, "stopped", "Worker stopped.")
+                    await _emit(runtime, "session_stopped", {"message": "Worker stopped."})
                     logger.info("worker stopped session=%s", runtime.session_id)
                     return
                 if queued.kind == "interrupt":
                     await client.interrupt()
-                    await _emit_phase(runtime, "interrupted", "Interrupt signal sent to active run.")
+                    await _emit(runtime, "session_interrupted", {"message": "Interrupt signal sent to active run."})
                     logger.info("interrupt sent to sdk session=%s", runtime.session_id)
                     continue
                 if queued.kind != "message":
@@ -224,47 +213,37 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                         session.state = SessionState.RESEARCH_IN_PROGRESS
                         store.append_message(session, MessageRole.USER, user_message, phase="intake")
 
-                await _emit_phase(runtime, "research_in_progress", "Agent is analyzing your request.")
+                await _emit(runtime, "agent_thinking", {"message": "Agent is analyzing your request."})
                 logger.info(
                     "query start session=%s sdk_session_id=%s message_len=%d",
                     runtime.session_id,
                     runtime.sdk_session_id,
                     len(user_message),
                 )
-                await _emit(
-                    runtime,
-                    "query_started",
-                    {
-                        "session_id": runtime.session_id,
-                        "sdk_session_id": runtime.sdk_session_id,
-                        "message_preview": user_message[:200],
-                    },
-                )
                 await client.query(user_message, session_id=runtime.sdk_session_id)
 
                 assistant_chunks: list[str] = []
                 tool_use_by_id: dict[str, str] = {}
-                interview_tool_started = False
                 interview_transcript_emitted = False
+
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
                         for block in msg.content:
                             if isinstance(block, TextBlock) and block.text.strip():
                                 text = block.text
                                 assistant_chunks.append(text)
-                                await _emit(runtime, "assistant_delta", {"text": text})
+                                await _emit(runtime, "agent_delta", {"text": text})
                                 logger.debug(
-                                    "assistant delta session=%s chars=%d",
+                                    "agent delta session=%s chars=%d",
                                     runtime.session_id,
                                     len(text),
                                 )
                             elif isinstance(block, ToolUseBlock):
                                 tool_use_by_id[block.id] = block.name
-                                tool_started_payload: dict[str, Any] = {
+                                tool_payload: dict[str, Any] = {
                                     "tool_name": block.name,
                                     "tool_use_id": block.id,
                                     "input": block.input,
-                                    "message": f"Tool started: {block.name}",
                                 }
                                 if "simulate_user_interview" in block.name:
                                     hypothesis = ""
@@ -272,29 +251,16 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                                     if isinstance(block.input, dict):
                                         hypothesis = str(block.input.get("hypothesis", "")).strip()
                                         persona = str(block.input.get("persona", "")).strip()
-                                    interview_message = _interview_start_message(
-                                        hypothesis=hypothesis,
-                                        persona=persona,
-                                    )
-                                    tool_started_payload["display_name"] = "Customer interview simulation"
-                                    tool_started_payload["message"] = interview_message
-                                    if hypothesis:
-                                        tool_started_payload["hypothesis"] = hypothesis
-                                    if persona:
-                                        tool_started_payload["persona"] = persona
-                                await _emit(
-                                    runtime,
-                                    "tool_started",
-                                    tool_started_payload,
-                                )
-                                if "simulate_user_interview" in block.name:
-                                    interview_tool_started = True
-                                    interview_message = tool_started_payload.get("message", "Interview in progress.")
-                                    await _emit_phase(
-                                        runtime,
-                                        "interview_in_progress",
-                                        str(interview_message),
-                                    )
+                                    tool_payload["hypothesis"] = hypothesis
+                                    tool_payload["persona"] = persona
+                                    await _emit(runtime, "interview_in_progress", {
+                                        "tool_use_id": block.id,
+                                        "message": _interview_start_message(hypothesis, persona),
+                                        "hypothesis": hypothesis,
+                                        "persona": persona,
+                                    })
+                                await _emit(runtime, "tool_started", tool_payload)
+
                             elif isinstance(block, ToolResultBlock):
                                 tool_name = tool_use_by_id.get(block.tool_use_id, "unknown_tool")
                                 await _emit(
@@ -304,7 +270,6 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                                         "tool_name": tool_name,
                                         "tool_use_id": block.tool_use_id,
                                         "is_error": block.is_error,
-                                        "message": f"Tool completed: {tool_name}",
                                     },
                                 )
                                 transcript = _extract_transcript_text(block.content)
@@ -317,13 +282,12 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                                         runtime,
                                         "interview_transcript",
                                         {
-                                            "tool_name": tool_name,
+                                            "tool_use_id": block.tool_use_id,
                                             "transcript": transcript,
-                                            "message": "Interview transcript generated.",
                                         },
                                     )
+
                     elif isinstance(msg, UserMessage):
-                        # Some SDK flows surface tool results via UserMessage content blocks.
                         if isinstance(msg.content, list):
                             for block in msg.content:
                                 if isinstance(block, ToolResultBlock):
@@ -336,7 +300,6 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                                             "tool_name": tool_name,
                                             "tool_use_id": block.tool_use_id,
                                             "is_error": block.is_error,
-                                            "message": f"Tool completed: {tool_name}",
                                         },
                                     )
                                     if transcript and (
@@ -348,11 +311,11 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                                             runtime,
                                             "interview_transcript",
                                             {
-                                                "tool_name": tool_name,
+                                                "tool_use_id": block.tool_use_id,
                                                 "transcript": transcript,
-                                                "message": "Interview transcript generated.",
                                             },
                                         )
+
                     elif isinstance(msg, ResultMessage):
                         runtime.sdk_session_id = msg.session_id or runtime.sdk_session_id
                         assistant_message = "".join(assistant_chunks).strip()
@@ -360,21 +323,22 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                             assistant_message = msg.result.strip()
                         if not assistant_message:
                             assistant_message = "Completed, but no text response was generated."
+
+                        # If the interview ran but transcript wasn't emitted via ToolResultBlock,
+                        # fall back to checking the assembled assistant message.
                         if (
-                            interview_tool_started
-                            and not interview_transcript_emitted
+                            not interview_transcript_emitted
                             and _looks_like_interview_transcript(assistant_message)
                         ):
-                            interview_transcript_emitted = True
                             await _emit(
                                 runtime,
                                 "interview_transcript",
                                 {
-                                    "tool_name": "mcp__research_server__simulate_user_interview",
+                                    "tool_use_id": None,
                                     "transcript": assistant_message,
-                                    "message": "Interview transcript inferred from final assistant output.",
                                 },
                             )
+
                         with store.lock:
                             session = store.get_session(runtime.session_id)
                             if session:
@@ -386,9 +350,27 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                                     assistant_message,
                                     phase="final",
                                 )
+
                         await _emit(
                             runtime,
-                            "done",
+                            "agent_response",
+                            {
+                                "session_id": runtime.session_id,
+                                "content": assistant_message,
+                            },
+                        )
+                        if _is_final_report(assistant_message):
+                            await _emit(
+                                runtime,
+                                "final_report",
+                                {
+                                    "session_id": runtime.session_id,
+                                    "content": assistant_message,
+                                },
+                            )
+                        await _emit(
+                            runtime,
+                            "session_done",
                             {
                                 "session_id": runtime.session_id,
                                 "sdk_session_id": runtime.sdk_session_id,
@@ -396,7 +378,6 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                                 "cost_usd": msg.total_cost_usd,
                             },
                         )
-                        await _emit_phase(runtime, "completed", "Response completed.")
                         logger.info(
                             "query done session=%s sdk_session_id=%s is_error=%s cost=%s",
                             runtime.session_id,
@@ -410,14 +391,18 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                             assistant_message,
                         )
                     else:
-                        await _emit(runtime, "message", {"type": type(msg).__name__})
+                        logger.debug(
+                            "sdk_unknown_message session=%s type=%s",
+                            runtime.session_id,
+                            type(msg).__name__,
+                        )
+
     except Exception as exc:
         with store.lock:
             session = store.get_session(runtime.session_id)
             if session:
                 session.state = SessionState.FAILED
         logger.exception("Worker failed for session=%s", runtime.session_id)
-        await _emit(runtime, "error", {"message": str(exc)})
-        await _emit_phase(runtime, "failed", "Worker failed while processing your request.")
+        await _emit(runtime, "session_error", {"message": str(exc)})
     finally:
         reset_tool_event_emitter(emitter_token)
