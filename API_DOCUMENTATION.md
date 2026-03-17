@@ -18,6 +18,22 @@ Standard flow:
 - No auth in v1 (internal/dev mode).
 - Add auth before public release.
 
+## Webhook Notifications
+The API can notify an external webhook when:
+- a session is created
+- the first user query is submitted for a session
+- the final assistant answer is generated
+- feedback is submitted for a session
+
+Environment variables:
+- `WEBHOOK_ENABLED=true`
+- `WEBHOOK_URL=https://your-system.example.com/webhooks/product-events`
+- `WEBHOOK_AUTH_HEADER=Authorization`
+- `WEBHOOK_AUTH_TOKEN=Bearer your-shared-secret-or-api-token`
+- `WEBHOOK_TIMEOUT_SECONDS=5`
+
+If your receiving system does not require auth, leave `WEBHOOK_AUTH_TOKEN` empty.
+
 ## Content Type
 - JSON for all POST APIs.
 - `text/event-stream` for SSE endpoint.
@@ -55,6 +71,24 @@ Response `200`:
   "session_id": "s_a1b2c3d4e5",
   "state": "NEW",
   "created_at": "2026-03-03T18:00:00.000000+00:00"
+}
+```
+
+Webhook emitted:
+```json
+{
+  "event_type": "session_created",
+  "occurred_at": "2026-03-17T10:00:00.000000+00:00",
+  "service": "business-research-agent",
+  "trigger": "POST /v1/sessions",
+  "session": {
+    "id": "s_a1b2c3d4e5",
+    "user_id": "local-user",
+    "title": "Interview",
+    "state": "NEW",
+    "created_at": "2026-03-17T10:00:00.000000+00:00",
+    "updated_at": "2026-03-17T10:00:00.000000+00:00"
+  }
 }
 ```
 
@@ -125,6 +159,51 @@ Response `200`:
 Important:
 - This endpoint returns quickly after queueing.
 - Actual assistant output comes via SSE stream endpoint.
+- On the first user message for a session, the backend also emits a `first_query_submitted` webhook.
+
+Webhook emitted on first user message only:
+```json
+{
+  "event_type": "first_query_submitted",
+  "occurred_at": "2026-03-17T10:05:00.000000+00:00",
+  "service": "business-research-agent",
+  "trigger": "POST /v1/chat/send",
+  "query": {
+    "length": 47,
+    "text": "I want to build a churn-reduction tool for gyms."
+  },
+  "session": {
+    "id": "s_a1b2c3d4e5",
+    "user_id": "local-user",
+    "title": "Interview",
+    "state": "NEW",
+    "created_at": "2026-03-17T10:00:00.000000+00:00",
+    "updated_at": "2026-03-17T10:00:00.000000+00:00"
+  }
+}
+```
+
+Webhook emitted when the assistant finishes:
+```json
+{
+  "event_type": "final_answer_generated",
+  "occurred_at": "2026-03-17T10:06:30.000000+00:00",
+  "service": "business-research-agent",
+  "trigger": "session completion",
+  "answer": {
+    "length": 320,
+    "text": "Here is the final answer shown to the user..."
+  },
+  "session": {
+    "id": "s_a1b2c3d4e5",
+    "user_id": "local-user",
+    "title": "Interview",
+    "state": "COMPLETED",
+    "created_at": "2026-03-17T10:00:00.000000+00:00",
+    "updated_at": "2026-03-17T10:06:30.000000+00:00"
+  }
+}
+```
 
 Response `404`:
 ```json
@@ -135,7 +214,67 @@ Response `404`:
 
 ---
 
-## 5) Interrupt Active Run
+## 5) Submit Feedback
+### `POST /v1/feedback`
+Stores a user rating for a session and sends a webhook notification.
+
+Request:
+```json
+{
+  "session_id": "s_a1b2c3d4e5",
+  "rating": 4,
+  "comment": "Good answer, but it needed more competitor detail."
+}
+```
+
+Validation notes:
+- `session_id` required
+- `rating` required, integer from `1` to `5`
+- `comment` optional, max `2000` chars
+
+Response `200`:
+```json
+{
+  "session_id": "s_a1b2c3d4e5",
+  "state": "COMPLETED",
+  "rating": 4,
+  "comment": "Good answer, but it needed more competitor detail.",
+  "message": "Feedback received"
+}
+```
+
+Webhook emitted:
+```json
+{
+  "event_type": "feedback_received",
+  "occurred_at": "2026-03-17T10:07:00.000000+00:00",
+  "service": "business-research-agent",
+  "trigger": "POST /v1/feedback",
+  "feedback": {
+    "rating": 4,
+    "comment": "Good answer, but it needed more competitor detail."
+  },
+  "session": {
+    "id": "s_a1b2c3d4e5",
+    "user_id": "local-user",
+    "title": "Interview",
+    "state": "COMPLETED",
+    "created_at": "2026-03-17T10:00:00.000000+00:00",
+    "updated_at": "2026-03-17T10:07:00.000000+00:00"
+  }
+}
+```
+
+Response `404`:
+```json
+{
+  "detail": "Session not found"
+}
+```
+
+---
+
+## 6) Interrupt Active Run
 ### `POST /v1/chat/interrupt`
 Sends interrupt signal to active Claude run for a session.
 

@@ -76,6 +76,20 @@ class InterruptResponse(BaseModel):
     message: str
 
 
+class FeedbackSubmitRequest(BaseModel):
+    session_id: str
+    rating: int = Field(..., ge=1, le=5)
+    comment: str = Field(default="", max_length=2000)
+
+
+class FeedbackSubmitResponse(BaseModel):
+    session_id: str
+    state: SessionState
+    rating: int
+    comment: str
+    message: str
+
+
 class SessionResponse(BaseModel):
     session_id: str
     user_id: str

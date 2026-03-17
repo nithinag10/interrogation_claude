@@ -20,12 +20,15 @@ from app.models import (
     ChatSendResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    FeedbackSubmitRequest,
+    FeedbackSubmitResponse,
     InterruptRequest,
     InterruptResponse,
     SessionResponse,
 )
 from app.runtime import RuntimeInput, RuntimeManager
-from app.store import InMemoryStore
+from app.store import InMemoryStore, utc_now_iso
+from app.webhooks import WebhookNotifier
 
 logger = setup_logging()
 
@@ -71,6 +74,7 @@ def create_app() -> FastAPI:
     )
     store = InMemoryStore()
     runtime_manager = RuntimeManager()
+    webhook_notifier = WebhookNotifier()
 
     @app.get("/")
     def root() -> dict[str, Any]:
@@ -81,9 +85,10 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/v1/sessions", response_model=CreateSessionResponse)
-    def create_session(payload: CreateSessionRequest) -> CreateSessionResponse:
+    async def create_session(payload: CreateSessionRequest) -> CreateSessionResponse:
         logger.info("POST /v1/sessions user_id=%s title=%s", payload.user_id, payload.title)
         session = store.create_session(user_id=payload.user_id, title=payload.title)
+        await webhook_notifier.notify_session_created(session)
         logger.info("session created session_id=%s", session.id)
         return CreateSessionResponse(
             session_id=session.id,
@@ -134,6 +139,11 @@ def create_app() -> FastAPI:
         with store.lock:
             refreshed = store.get_session(payload.session_id)
             state = refreshed.state if refreshed else session.state
+            is_first_query = not bool(session.context.get("first_query_webhook_sent"))
+            if is_first_query:
+                session.context["first_query_webhook_sent"] = True
+        if is_first_query:
+            await webhook_notifier.notify_first_query(session, payload.message)
         return ChatSendResponse(
             session_id=payload.session_id,
             state=state,
@@ -161,6 +171,48 @@ def create_app() -> FastAPI:
             session_id=payload.session_id,
             state=session.state,
             message="Interrupt requested",
+        )
+
+    @app.post("/v1/feedback", response_model=FeedbackSubmitResponse)
+    async def submit_feedback(payload: FeedbackSubmitRequest) -> FeedbackSubmitResponse:
+        logger.info(
+            "POST /v1/feedback session_id=%s rating=%s comment_len=%d",
+            payload.session_id,
+            payload.rating,
+            len(payload.comment),
+        )
+        with store.lock:
+            session = store.get_session(payload.session_id)
+            if not session:
+                logger.warning("feedback session not found session_id=%s", payload.session_id)
+                raise HTTPException(status_code=404, detail="Session not found")
+
+            feedback_entry = {
+                "rating": payload.rating,
+                "comment": payload.comment.strip(),
+                "submitted_at": utc_now_iso(),
+            }
+            session.context["latest_feedback"] = feedback_entry
+            feedback_history = session.context.setdefault("feedback_history", [])
+            if isinstance(feedback_history, list):
+                feedback_history.append(feedback_entry)
+            session.updated_at = utc_now_iso()
+            state = session.state
+
+        logger.info(
+            "feedback stored session_id=%s rating=%s history_count=%d",
+            payload.session_id,
+            payload.rating,
+            len(session.context.get("feedback_history", [])) if isinstance(session.context.get("feedback_history", []), list) else 0,
+        )
+        await webhook_notifier.notify_feedback_received(session, payload.rating, payload.comment.strip())
+
+        return FeedbackSubmitResponse(
+            session_id=payload.session_id,
+            state=state,
+            rating=payload.rating,
+            comment=payload.comment.strip(),
+            message="Feedback received",
         )
 
     @app.get("/v1/chat/stream/{session_id}")

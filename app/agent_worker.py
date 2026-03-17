@@ -23,8 +23,10 @@ from app.runtime import RuntimeInput, SessionRuntime
 from app.store import InMemoryStore
 from app.tool_event_bridge import reset_tool_event_emitter, set_tool_event_emitter
 from app.tools import create_research_server
+from app.webhooks import WebhookNotifier
 
 logger = setup_logging()
+webhook_notifier = WebhookNotifier()
 
 
 async def _emit(runtime: SessionRuntime, event: str, data: dict[str, Any]) -> None:
@@ -350,6 +352,14 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
                                     assistant_message,
                                     phase="final",
                                 )
+                                should_send_final_answer = not bool(session.context.get("final_answer_webhook_sent"))
+                                if should_send_final_answer:
+                                    session.context["final_answer_webhook_sent"] = True
+                            else:
+                                should_send_final_answer = False
+
+                        if should_send_final_answer and session:
+                            await webhook_notifier.notify_final_answer(session, assistant_message)
 
                         await _emit(
                             runtime,
