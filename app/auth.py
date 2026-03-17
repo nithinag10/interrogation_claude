@@ -71,10 +71,13 @@ class CurrentUser(BaseModel):
 
 
 async def get_current_user(request: Request) -> CurrentUser:
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
-    token = auth_header.removeprefix("Bearer ").strip()
+    # Accept token from Authorization header or ?token= query param (needed for EventSource)
+    token = request.query_params.get("token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+        token = auth_header.removeprefix("Bearer ").strip()
     payload = decode_jwt(token)
     return CurrentUser(
         id=payload["sub"],

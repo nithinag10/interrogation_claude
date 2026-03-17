@@ -43,7 +43,6 @@ class SessionRecord(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    user_id: str = Field(..., min_length=1, max_length=128)
     title: str = Field(default="Business Research Session", max_length=200)
 
 

@@ -8,11 +8,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.auth import router as auth_router
+from app.auth import CurrentUser, get_current_user, router as auth_router
 from app.agent_worker import run_session_worker
 from app.events import RunnerEvent, to_sse
 from app.logging_utils import setup_logging
@@ -88,9 +88,12 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/v1/sessions", response_model=CreateSessionResponse)
-    async def create_session(payload: CreateSessionRequest) -> CreateSessionResponse:
-        logger.info("POST /v1/sessions user_id=%s title=%s", payload.user_id, payload.title)
-        session = store.create_session(user_id=payload.user_id, title=payload.title)
+    async def create_session(
+        payload: CreateSessionRequest,
+        current_user: CurrentUser = Depends(get_current_user),
+    ) -> CreateSessionResponse:
+        logger.info("POST /v1/sessions user_id=%s title=%s", current_user.id, payload.title)
+        session = store.create_session(user_id=current_user.id, title=payload.title)
         await webhook_notifier.notify_session_created(session)
         logger.info("session created session_id=%s", session.id)
         return CreateSessionResponse(
@@ -100,12 +103,17 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/v1/sessions/{session_id}", response_model=SessionResponse)
-    def get_session(session_id: str) -> SessionResponse:
+    def get_session(
+        session_id: str,
+        current_user: CurrentUser = Depends(get_current_user),
+    ) -> SessionResponse:
         logger.info("GET /v1/sessions/%s", session_id)
         session = store.get_session(session_id)
         if not session:
             logger.warning("session not found session_id=%s", session_id)
             raise HTTPException(status_code=404, detail="Session not found")
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
         return SessionResponse(
             session_id=session.id,
@@ -119,7 +127,10 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/v1/chat/send", response_model=ChatSendResponse)
-    async def send_chat(payload: ChatSendRequest) -> ChatSendResponse:
+    async def send_chat(
+        payload: ChatSendRequest,
+        current_user: CurrentUser = Depends(get_current_user),
+    ) -> ChatSendResponse:
         logger.info(
             "POST /v1/chat/send session_id=%s message_len=%d stream=%s",
             payload.session_id,
@@ -131,6 +142,8 @@ def create_app() -> FastAPI:
         if not session:
             logger.warning("send_chat session not found session_id=%s", payload.session_id)
             raise HTTPException(status_code=404, detail="Session not found")
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
         runtime = runtime_manager.get_or_create(payload.session_id)
         if runtime.worker_task is None or runtime.worker_task.done():
@@ -155,13 +168,18 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/v1/chat/interrupt", response_model=InterruptResponse)
-    async def interrupt_chat(payload: InterruptRequest) -> InterruptResponse:
+    async def interrupt_chat(
+        payload: InterruptRequest,
+        current_user: CurrentUser = Depends(get_current_user),
+    ) -> InterruptResponse:
         logger.info("POST /v1/chat/interrupt session_id=%s", payload.session_id)
         with store.lock:
             session = store.get_session(payload.session_id)
         if not session:
             logger.warning("interrupt session not found session_id=%s", payload.session_id)
             raise HTTPException(status_code=404, detail="Session not found")
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
         runtime = runtime_manager.get(payload.session_id)
         if not runtime or not runtime.worker_task or runtime.worker_task.done():
@@ -177,7 +195,10 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/v1/feedback", response_model=FeedbackSubmitResponse)
-    async def submit_feedback(payload: FeedbackSubmitRequest) -> FeedbackSubmitResponse:
+    async def submit_feedback(
+        payload: FeedbackSubmitRequest,
+        current_user: CurrentUser = Depends(get_current_user),
+    ) -> FeedbackSubmitResponse:
         logger.info(
             "POST /v1/feedback session_id=%s rating=%s comment_len=%d",
             payload.session_id,
@@ -189,6 +210,8 @@ def create_app() -> FastAPI:
             if not session:
                 logger.warning("feedback session not found session_id=%s", payload.session_id)
                 raise HTTPException(status_code=404, detail="Session not found")
+            if session.user_id != current_user.id:
+                raise HTTPException(status_code=403, detail="Forbidden")
 
             feedback_entry = {
                 "rating": payload.rating,
@@ -219,13 +242,19 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/v1/chat/stream/{session_id}")
-    async def stream_chat(session_id: str, request: Request) -> StreamingResponse:
+    async def stream_chat(
+        session_id: str,
+        request: Request,
+        current_user: CurrentUser = Depends(get_current_user),
+    ) -> StreamingResponse:
         logger.info("GET /v1/chat/stream/%s", session_id)
         with store.lock:
             session = store.get_session(session_id)
         if not session:
             logger.warning("stream session not found session_id=%s", session_id)
             raise HTTPException(status_code=404, detail="Session not found")
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
         runtime = runtime_manager.get_or_create(session_id)
 
