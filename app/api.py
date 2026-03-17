@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from app.auth import router as auth_router
 from app.agent_worker import run_session_worker
 from app.events import RunnerEvent, to_sse
 from app.logging_utils import setup_logging
@@ -72,6 +73,8 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.include_router(auth_router)
+
     store = InMemoryStore()
     runtime_manager = RuntimeManager()
     webhook_notifier = WebhookNotifier()
