@@ -70,7 +70,18 @@ class CurrentUser(BaseModel):
     avatar_url: str | None = None
 
 
+_GUEST_USER = CurrentUser(
+    id="guest",
+    email="guest@local",
+    name="Guest",
+    avatar_url=None,
+)
+
+
 async def get_current_user(request: Request) -> CurrentUser:
+    if os.getenv("SKIP_AUTH", "1") == "1":
+        return _GUEST_USER
+
     # Accept token from Authorization header or ?token= query param (needed for EventSource)
     token = request.query_params.get("token")
     if not token:

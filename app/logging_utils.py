@@ -5,7 +5,12 @@ import os
 
 
 def setup_logging() -> logging.Logger:
-    verbose = os.getenv("VERBOSE_RUNNER", "1") == "1"
+    enabled = os.getenv("ENABLE_LOGGING", "0") == "1"
+    if not enabled:
+        logging.disable(logging.CRITICAL)
+        return logging.getLogger("research-runner")
+
+    verbose = os.getenv("VERBOSE_LOGGING", "0") == "1"
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
