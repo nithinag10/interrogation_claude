@@ -21,6 +21,7 @@ from app.models import MessageRole, SessionState
 from app.prompt_loader import load_system_prompt
 from app.runtime import RuntimeInput, SessionRuntime
 from app.store import InMemoryStore
+from app.crawl_context import reset_crawl_dir, set_crawl_dir
 from app.tool_event_bridge import reset_tool_event_emitter, set_tool_event_emitter
 from app.tools import create_research_server
 from app.webhooks import WebhookNotifier
@@ -85,8 +86,29 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
         await _emit(runtime, event, data)
 
     emitter_token = set_tool_event_emitter(_tool_emit)
+
+    # Wait for crawl to finish before constructing the SDK client,
+    # so the system prompt includes the product summary.
+    while True:
+        with store.lock:
+            session = store.get_session(runtime.session_id)
+            crawl_status = session.context.get("crawl_status") if session else None
+        if crawl_status not in ("pending", "in_progress"):
+            break
+        await _emit(runtime, "agent_waiting", {"message": "Waiting for website crawl to complete..."})
+        await asyncio.sleep(2)
+
+    # Set crawl directory context so read_product_docs tool can find the files
+    with store.lock:
+        session = store.get_session(runtime.session_id)
+    crawl_dir = session.context.get("crawl_dir") if session else None
+    crawl_dir_token = set_crawl_dir(crawl_dir)
+
     server = create_research_server()
-    system_prompt = load_system_prompt()
+
+    # Load system prompt with product context if available (after crawl completes)
+    product_summary = session.context.get("product_summary") if session else None
+    system_prompt = load_system_prompt(product_context=product_summary)
 
     async def can_use_tool(tool_name: str, input_data: dict[str, Any], _context: Any):
         logger.info("can_use_tool session=%s tool=%s", runtime.session_id, tool_name)
@@ -167,7 +189,7 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
         mcp_servers={"research_server": server},
-        allowed_tools=["AskUserQuestion", "mcp__research_server__simulate_user_interview"],
+        allowed_tools=["AskUserQuestion", "mcp__research_server__simulate_user_interview", "mcp__research_server__read_product_docs"],
         can_use_tool=can_use_tool,
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use_hook])]},
         stderr=lambda line: logger.debug("sdk-stderr: %s", line.rstrip()),
@@ -415,4 +437,5 @@ async def run_session_worker(runtime: SessionRuntime, store: InMemoryStore) -> N
         logger.exception("Worker failed for session=%s", runtime.session_id)
         await _emit(runtime, "session_error", {"message": str(exc)})
     finally:
+        reset_crawl_dir(crawl_dir_token)
         reset_tool_event_emitter(emitter_token)

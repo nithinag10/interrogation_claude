@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from pathlib import Path
 
 import anthropic
 from claude_agent_sdk import (
@@ -11,6 +12,7 @@ from claude_agent_sdk import (
 )
 
 try:
+    from app.crawl_context import get_crawl_dir
     from app.logging_utils import setup_logging
     from app.prompt_loader import (
         load_customer_system_prompt,
@@ -18,6 +20,7 @@ try:
     )
     from app.tool_event_bridge import emit_tool_event
 except ModuleNotFoundError:
+    from crawl_context import get_crawl_dir
     from logging_utils import setup_logging
     from prompt_loader import (
         load_customer_system_prompt,
@@ -180,9 +183,63 @@ async def simulate_user_interview(args: dict[str, str]) -> dict[str, object]:
     return {"content": [{"type": "text", "text": transcript}]}
 
 
+@tool(
+    name="read_product_docs",
+    description=(
+        "Reads crawled website content for the founder's product. "
+        "Pass 'list' to see all available pages, or a page name like "
+        "'pricing', 'features', 'about' to read that specific page."
+    ),
+    input_schema={"page_name": str},
+)
+async def read_product_docs(args: dict[str, str]) -> dict[str, object]:
+    page_name = args["page_name"].strip().lower()
+    crawl_dir = get_crawl_dir()
+
+    if not crawl_dir:
+        return {"content": [{"type": "text", "text": "No website was crawled for this session. Ask the user to describe their product."}]}
+
+    crawl_path = Path(crawl_dir)
+    if not crawl_path.exists():
+        return {"content": [{"type": "text", "text": "Crawl data directory not found. Ask the user to describe their product."}]}
+
+    if page_name == "list":
+        index_file = crawl_path / "_index.md"
+        if index_file.exists():
+            return {"content": [{"type": "text", "text": index_file.read_text(encoding="utf-8")}]}
+        return {"content": [{"type": "text", "text": "No index file found."}]}
+
+    # Try exact match first, then with .md extension
+    candidates = [
+        crawl_path / f"{page_name}.md",
+        crawl_path / page_name,
+    ]
+    # Also try partial match across all files
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return {"content": [{"type": "text", "text": candidate.read_text(encoding="utf-8")}]}
+
+    # Fuzzy search: find files containing the page_name
+    for md_file in sorted(crawl_path.glob("*.md")):
+        if md_file.name == "_index.md":
+            continue
+        if page_name in md_file.stem.lower():
+            return {"content": [{"type": "text", "text": md_file.read_text(encoding="utf-8")}]}
+
+    available = [f.stem for f in sorted(crawl_path.glob("*.md")) if f.name != "_index.md"]
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": f"Page '{page_name}' not found. Available pages: {', '.join(available) or 'none'}",
+            }
+        ]
+    }
+
+
 def create_research_server():
     return create_sdk_mcp_server(
         name="research_server",
         version="1.0.0",
-        tools=[simulate_user_interview],
+        tools=[simulate_user_interview, read_product_docs],
     )

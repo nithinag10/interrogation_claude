@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from app.auth import CurrentUser, get_current_user, router as auth_router
 from app.agent_worker import run_session_worker
+from app.crawler import cleanup_crawl_data, crawl_domain
 from app.events import RunnerEvent, to_sse
 from app.logging_utils import setup_logging
 from app.models import (
@@ -26,6 +27,7 @@ from app.models import (
     InterruptRequest,
     InterruptResponse,
     SessionResponse,
+    SessionState,
 )
 from app.runtime import RuntimeInput, RuntimeManager
 from app.store import InMemoryStore, utc_now_iso
@@ -75,9 +77,49 @@ def create_app() -> FastAPI:
     )
     app.include_router(auth_router)
 
+    cleanup_crawl_data()
+
     store = InMemoryStore()
     runtime_manager = RuntimeManager()
     webhook_notifier = WebhookNotifier()
+
+    async def _run_crawl(session_id: str, domain: str) -> None:
+        runtime = runtime_manager.get_or_create(session_id)
+
+        async def _crawl_emit(event: str, data: dict[str, Any]) -> None:
+            await runtime.event_queue.put(RunnerEvent(event=event, data=data))
+
+        try:
+            with store.lock:
+                session = store.get_session(session_id)
+                if session:
+                    session.context["crawl_status"] = "in_progress"
+
+            result = await crawl_domain(
+                session_id=session_id,
+                domain=domain,
+                event_emitter=_crawl_emit,
+            )
+
+            with store.lock:
+                session = store.get_session(session_id)
+                if session:
+                    session.context["crawl_status"] = "completed"
+                    session.context["product_summary"] = result.product_summary
+                    session.context["crawl_dir"] = result.crawl_dir
+                    session.context["page_manifest"] = result.page_manifest
+                    session.state = SessionState.NEW
+        except Exception as exc:
+            logger.exception("crawl failed session_id=%s", session_id)
+            await _crawl_emit(
+                "crawl_failed",
+                {"domain": domain, "error": str(exc), "message": "Failed to crawl website."},
+            )
+            with store.lock:
+                session = store.get_session(session_id)
+                if session:
+                    session.context["crawl_status"] = "failed"
+                    session.state = SessionState.NEW
 
     @app.get("/")
     def root() -> dict[str, Any]:
@@ -92,14 +134,26 @@ def create_app() -> FastAPI:
         payload: CreateSessionRequest,
         current_user: CurrentUser = Depends(get_current_user),
     ) -> CreateSessionResponse:
-        logger.info("POST /v1/sessions user_id=%s title=%s", current_user.id, payload.title)
+        logger.info("POST /v1/sessions user_id=%s title=%s domain=%s", current_user.id, payload.title, payload.domain)
         session = store.create_session(user_id=current_user.id, title=payload.title)
         await webhook_notifier.notify_session_created(session)
+
+        crawl_status: str | None = None
+        if payload.domain:
+            session.context["domain"] = payload.domain
+            session.context["crawl_status"] = "pending"
+            session.state = SessionState.CRAWLING
+            crawl_status = "pending"
+            runtime = runtime_manager.get_or_create(session.id)
+            runtime.crawl_task = asyncio.create_task(_run_crawl(session.id, payload.domain))
+            logger.info("crawl queued session_id=%s domain=%s", session.id, payload.domain)
+
         logger.info("session created session_id=%s", session.id)
         return CreateSessionResponse(
             session_id=session.id,
             state=session.state,
             created_at=session.created_at,
+            crawl_status=crawl_status,
         )
 
     @app.get("/v1/sessions/{session_id}", response_model=SessionResponse)
@@ -280,3 +334,6 @@ def create_app() -> FastAPI:
         )
 
     return app
+
+
+app = create_app()

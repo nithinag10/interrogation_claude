@@ -20,6 +20,7 @@ class SessionRuntime:
     input_queue: asyncio.Queue[RuntimeInput] = field(default_factory=asyncio.Queue)
     event_queue: asyncio.Queue[RunnerEvent] = field(default_factory=asyncio.Queue)
     worker_task: asyncio.Task[None] | None = None
+    crawl_task: asyncio.Task[None] | None = None
 
 
 class RuntimeManager:

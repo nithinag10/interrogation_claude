@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 class SessionState(StrEnum):
     NEW = "NEW"
+    CRAWLING = "CRAWLING"
     INTAKE = "INTAKE"
     AWAITING_CLARIFICATION = "AWAITING_CLARIFICATION"
     READY_FOR_RESEARCH = "READY_FOR_RESEARCH"
@@ -44,12 +45,14 @@ class SessionRecord(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     title: str = Field(default="Business Research Session", max_length=200)
+    domain: str | None = Field(default=None, max_length=500)
 
 
 class CreateSessionResponse(BaseModel):
     session_id: str
     state: SessionState
     created_at: str
+    crawl_status: str | None = None
 
 
 class ChatSendRequest(BaseModel):
